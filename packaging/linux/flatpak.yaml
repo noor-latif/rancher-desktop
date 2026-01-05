@@ -1,78 +1,105 @@
-# This file is unused and just kept for reference for plain flatpak builds
-id: io.rancherdesktop.app
+id: io.rancherdesktop.RancherDesktop
 branch: main
 runtime: org.freedesktop.Platform
-runtime-version: '21.08'
+runtime-version: '24.08'
 sdk: org.freedesktop.Sdk
 base: org.electronjs.Electron2.BaseApp
-base-version: '21.08'
+base-version: '24.08'
 sdk-extensions:
-  # Not really needed since we are not building the app here
-  - org.freedesktop.Sdk.Extension.node14
-command: electron-wrapper
-separate-locales: false
+  - org.freedesktop.Sdk.Extension.node22
+build-options:
+  append-path: /usr/lib/sdk/node22/bin
+
+command: rancher-desktop
+
 finish-args:
   - --share=ipc
   - --socket=x11
   - --socket=wayland
-  - --share=network
   - --device=dri
+  - --share=network
   - --device=kvm
   - --filesystem=xdg-config/rancher-desktop:create
   - --filesystem=xdg-cache/rancher-desktop:create
   - --filesystem=xdg-data/rancher-desktop:create
-  - --filesystem=home
   - --talk-name=org.freedesktop.Notifications
-  - --own-name=org.kde.*
-rename-desktop-file: rancher-desktop.desktop
-rename-appdata-file: rancher-desktop.appdata.xml
+
 modules:
+  # QEMU for container runtime
+  - name: qemu
+    buildsystem: autotools
+    config-opts:
+      - --disable-user
+      - --disable-vnc
+      - --disable-sdl
+      - --disable-gtk
+      - --disable-curses
+      - --disable-iconv
+      - --disable-gio
+      - --enable-kvm
+      - --target-list=x86_64-softmmu
+    sources:
+      - type: archive
+        url: https://download.qemu.org/qemu-8.2.2.tar.xz
+        sha256: 847346c1b82c1a54b2c38f6edbd85549edeb17430b7d4d3da12620e2962bc4f3
+    cleanup:
+      - /bin/qemu-ga
+      - /bin/qemu-pr-helper
+      - /bin/qemu-nbd
+      - /bin/qemu-img
+      - /bin/qemu-io
+      - /share/doc
+
+  # Main Rancher Desktop app
   - name: rancher-desktop
     buildsystem: simple
     sources:
       - type: dir
         path: .
-      - type: script
-        dest-filename: electron-wrapper
-        commands:
-          - |
-            export TMPDIR="$XDG_RUNTIME_DIR/app/$FLATPAK_ID"
-
-            zypak-wrapper /app/lib/io.rancherdesktop.app/rancher-desktop "$@"
     build-commands:
-      # Bundle electron build after yarn build -- --linux dir 
-      - mkdir -p /app/lib/io.rancherdesktop.app
-      - unzip rancher-desktop.zip -d /app/lib/io.rancherdesktop.app
-      # Remove in app qemu binaries
-      - rm /app/lib/io.rancherdesktop.app/lib /app/lib/io.rancherdesktop.app/pc-bios /app/lib/io.rancherdesktop.app/qemu-* -rf
-      # Include FreeDesktop integration files at expected locations
+      # Ensure yarn shim is available from the SDK extension
+      - corepack enable
+      # Install dependencies
+      - yarn install --frozen-lockfile
+      # Build app
+      - yarn build
+      # Build electron distribution
+      - yarn run build:linux -- --linux dir
+      # Prepare app directory
+      - mkdir -p /app/lib/io.rancherdesktop.RancherDesktop
+      - unzip -q dist/linux-unpacked/rancher-desktop*.zip -d /app/lib/io.rancherdesktop.RancherDesktop || unzip -q dist/Rancher*.zip -d /app/lib/io.rancherdesktop.RancherDesktop || cp -r dist/linux-unpacked/* /app/lib/io.rancherdesktop.RancherDesktop/
+      # Remove bundled qemu (we use system qemu)
       - |
-        rm -rf /app/share/metainfo /app/share/icons /app/share/applications
-        mkdir -p /app/share/metainfo /app/share/applications
-
-        icon="/app/lib/io.rancherdesktop.app/resources/resources/icons/logo-square-512.png"
-        for size in 512x512 256x256 128x128 96x96 64x64 48x48 32x32 24x24 16x16; do
-          mkdir "/app/share/icons/hicolor/${size}/apps" -p
-          ffmpeg -i "${icon}" -vf scale="${size}" "/app/share/icons/hicolor/${size}/apps/io.rancherdesktop.app.png"
-        done
-
-        mv /app/lib/io.rancherdesktop.app/resources/resources/linux/rancher-desktop.desktop /app/share/applications
-        mv /app/lib/io.rancherdesktop.app/resources/resources/linux/rancher-desktop.appdata.xml /app/share/metainfo
-      # Install app wrapper
-      - install -Dm755 -t /app/bin/ electron-wrapper
-    modules:
-    - name: qemu
-      config-opts:
-      - "--disable-user"
-      - "--disable-vnc"
-      - "--disable-sdl"
-      - "--disable-gtk"
-      - "--disable-curses"
-      - "--disable-iconv"
-      - "--disable-gio"
-      - "--enable-kvm"
-      - "--target-list=x86_64-softmmu"
-      sources:
-      - type: archive
-        url: https://download.qemu.org/qemu-6.1.0.tar.xz
-        sha256: eebc089db3414bbeedf1e464beda0a7515aad30f73261abc246c9b27503a3c96
+        rm -rf \
+          /app/lib/io.rancherdesktop.RancherDesktop/lib \
+          /app/lib/io.rancherdesktop.RancherDesktop/pc-bios \
+          /app/lib/io.rancherdesktop.RancherDesktop/qemu-* || true
+      # Setup desktop integration
+      - |
+        mkdir -p /app/share/metainfo /app/share/applications /app/share/icons/hicolor/512x512/apps
+        
+        # Copy and rename desktop file
+        if [ -f /app/lib/io.rancherdesktop.RancherDesktop/resources/resources/linux/rancher-desktop.desktop ]; then
+          cp /app/lib/io.rancherdesktop.RancherDesktop/resources/resources/linux/rancher-desktop.desktop /app/share/applications/io.rancherdesktop.RancherDesktop.desktop
+          sed -i "s|Exec=.*|Exec=/app/bin/rancher-desktop|g" /app/share/applications/io.rancherdesktop.RancherDesktop.desktop
+          sed -i "s|Icon=.*|Icon=io.rancherdesktop.RancherDesktop|g" /app/share/applications/io.rancherdesktop.RancherDesktop.desktop
+        fi
+        
+        # Copy and rename appdata
+        if [ -f /app/lib/io.rancherdesktop.RancherDesktop/resources/resources/linux/rancher-desktop.appdata.xml ]; then
+          cp /app/lib/io.rancherdesktop.RancherDesktop/resources/resources/linux/rancher-desktop.appdata.xml /app/share/metainfo/io.rancherdesktop.RancherDesktop.metainfo.xml
+        fi
+        
+        # Copy icon
+        if [ -f /app/lib/io.rancherdesktop.RancherDesktop/resources/resources/icons/logo-square-512.png ]; then
+          cp /app/lib/io.rancherdesktop.RancherDesktop/resources/resources/icons/logo-square-512.png /app/share/icons/hicolor/512x512/apps/io.rancherdesktop.RancherDesktop.png
+        fi
+      # Install wrapper script
+      - |
+        cat > /app/bin/rancher-desktop << 'EOF'
+        #!/bin/bash
+        export TMPDIR="${XDG_RUNTIME_DIR}/app/${FLATPAK_ID}"
+        mkdir -p "$TMPDIR"
+        exec /app/lib/io.rancherdesktop.RancherDesktop/rancher-desktop "$@"
+        EOF
+        chmod +x /app/bin/rancher-desktop
